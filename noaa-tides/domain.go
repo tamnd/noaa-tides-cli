@@ -1,30 +1,26 @@
-package noaa-tides
+package noaatides
 
 import (
 	"context"
-	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/tamnd/any-cli/kit"
 	"github.com/tamnd/any-cli/kit/errs"
 )
 
-// domain.go exposes noaa-tides as a kit Domain: a driver that a multi-domain
+// domain.go exposes noaatides as a kit Domain: a driver that a multi-domain
 // host (ant) enables with a single blank import,
 //
 //	import _ "github.com/tamnd/noaa-tides-cli/noaa-tides"
 //
-// exactly as a database/sql program enables a driver with `import _
-// "github.com/lib/pq"`. The init below registers it; the host then dereferences
-// noaa-tides:// URIs by routing to the operations Register installs. The same
-// Domain also builds the standalone noaa-tides binary (see cli.NewApp), so the
-// binary and a host share one source of truth.
-//
-// This is the scaffold's starting point: one resource type, "page", served by a
-// resolver op and a list op. Add your real types here as you model the site.
+// The init below registers it; the host then dereferences noaa-tides:// URIs by
+// routing to the operations Register installs. The same Domain also builds the
+// standalone noaa-tides binary (see cli.NewApp), so the binary and a host share
+// one source of truth.
 func init() { kit.Register(Domain{}) }
 
-// Domain is the noaa-tides driver. It carries no state; the per-run client is
+// Domain is the NOAA Tides driver. It carries no state; the per-run client is
 // built by the factory Register hands kit.
 type Domain struct{}
 
@@ -32,46 +28,69 @@ type Domain struct{}
 // the identity reused for the binary's help and version.
 func (Domain) Info() kit.DomainInfo {
 	return kit.DomainInfo{
-		Scheme: "noaa-tides",
+		Scheme: "noaatides",
 		Hosts:  []string{Host},
 		Identity: kit.Identity{
 			Binary: "noaa-tides",
-			Short:  "A command line for noaa-tides.",
-			Long: `A command line for noaa-tides.
+			Short:  "Fetch tides, water levels, and weather from NOAA.",
+			Long: `noaa-tides reads public NOAA Tides and Currents data over plain HTTPS,
+shapes it into clean records, and prints output that pipes into the rest of
+your tools. No API key required.
 
-noaa-tides reads public noaa-tides data over plain HTTPS, shapes it into
-clean records, and prints output that pipes into the rest of your tools. No API
-key, nothing to run alongside it.`,
-			Site: Host,
+Commands:
+  water-level   Observed water level readings for a station
+  predictions   Hi/lo tide predictions for a station
+  air-temp      Observed air temperature readings for a station
+  stations      List all NOAA tide prediction stations`,
+			Site: "tidesandcurrents.noaa.gov",
 			Repo: "https://github.com/tamnd/noaa-tides-cli",
 		},
 	}
 }
 
-// Register installs the client factory and every operation onto app. A resolver
-// op (Single) names its own record type and answers `ant get`; a List op
-// enumerates a parent resource's members and answers `ant ls`.
+// Register installs the client factory and every operation onto app.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	// Resolver op: one record per id, the home of `noaa-tides page` and
-	// `ant get noaa-tides://page/<id>`.
-	kit.Handle(app, kit.OpMeta{Name: "page", Group: "read", Single: true,
-		Summary: "Fetch a page by path or URL", URIType: "page", Resolver: true,
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, getPage)
+	kit.Handle(app, kit.OpMeta{
+		Name:    "water-level",
+		Group:   "read",
+		List:    true,
+		Summary: "Fetch observed water level readings for a station",
+		URIType: "station",
+		Args:    []kit.Arg{{Name: "station", Help: "station ID e.g. 8443970"}},
+	}, waterLevel)
 
-	// List op: members of a page, the home of `noaa-tides links` and `ant ls`.
-	// It emits page stubs, so every listed member is itself an addressable
-	// noaa-tides://page/ URI a host can follow.
-	kit.Handle(app, kit.OpMeta{Name: "links", Group: "read", List: true,
-		Summary: "List the pages a page links to", URIType: "page",
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, listLinks)
+	kit.Handle(app, kit.OpMeta{
+		Name:    "predictions",
+		Group:   "read",
+		List:    true,
+		Summary: "Fetch hi/lo tide predictions for a station",
+		URIType: "station",
+		Args:    []kit.Arg{{Name: "station", Help: "station ID e.g. 8443970"}},
+	}, predictions)
+
+	kit.Handle(app, kit.OpMeta{
+		Name:    "air-temp",
+		Group:   "read",
+		List:    true,
+		Summary: "Fetch observed air temperature readings for a station",
+		URIType: "station",
+		Args:    []kit.Arg{{Name: "station", Help: "station ID e.g. 8443970"}},
+	}, airTemp)
+
+	kit.Handle(app, kit.OpMeta{
+		Name:    "stations",
+		Group:   "read",
+		List:    true,
+		Summary: "List all NOAA tide prediction stations",
+		URIType: "station",
+	}, stations)
 }
 
-// newClient builds the client from the host-resolved config, so a host and the
-// standalone binary pace and identify themselves the same way.
+// newClient builds the client from the host-resolved config.
 func newClient(_ context.Context, cfg kit.Config) (any, error) {
-	c := NewClient()
+	c := DefaultConfig()
 	if cfg.UserAgent != "" {
 		c.UserAgent = cfg.UserAgent
 	}
@@ -82,45 +101,61 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 		c.Retries = cfg.Retries
 	}
 	if cfg.Timeout > 0 {
-		c.HTTP.Timeout = cfg.Timeout
+		c.Timeout = cfg.Timeout
 	}
-	return c, nil
+	return NewClient(c), nil
 }
 
 // --- inputs ---
-//
-// Each handler takes a typed input struct. kit fills the fields from the tags:
-// kit:"arg" is a positional argument, kit:"flag,inherit" binds the framework's
-// shared flag of the same name, and kit:"inject" receives the client newClient
-// builds.
 
-type pageRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
-	Client *Client `kit:"inject"`
+type waterLevelInput struct {
+	Station   string  `kit:"arg" help:"station ID e.g. 8443970"`
+	BeginDate string  `kit:"flag" help:"start date YYYYMMDD" default:"20240101"`
+	EndDate   string  `kit:"flag" help:"end date YYYYMMDD" default:"20240101"`
+	Datum     string  `kit:"flag" help:"datum: MLLW|NAVD|MSL|MHW" default:"MLLW"`
+	Client    *Client `kit:"inject"`
 }
 
-type listRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
-	Limit  int     `kit:"flag,inherit" help:"max results"`
+type predictionsInput struct {
+	Station   string  `kit:"arg" help:"station ID e.g. 8443970"`
+	BeginDate string  `kit:"flag" help:"start date YYYYMMDD" default:"20240101"`
+	EndDate   string  `kit:"flag" help:"end date YYYYMMDD" default:"20240103"`
+	Client    *Client `kit:"inject"`
+}
+
+type airTempInput struct {
+	Station   string  `kit:"arg" help:"station ID e.g. 8443970"`
+	BeginDate string  `kit:"flag" help:"start date YYYYMMDD" default:"20240101"`
+	EndDate   string  `kit:"flag" help:"end date YYYYMMDD" default:"20240101"`
+	Client    *Client `kit:"inject"`
+}
+
+type stationsInput struct {
+	Limit  int     `kit:"flag,inherit"`
 	Client *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
-func getPage(ctx context.Context, in pageRef, emit func(*Page) error) error {
-	p, err := in.Client.GetPage(ctx, pagePath(in.Ref))
+func waterLevel(ctx context.Context, in waterLevelInput, emit func(*Observation) error) error {
+	obs, err := in.Client.WaterLevel(ctx, in.Station, in.BeginDate, in.EndDate, in.Datum)
 	if err != nil {
 		return mapErr(err)
 	}
-	return emit(p)
+	for _, o := range obs {
+		if err := emit(o); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
-	pages, err := in.Client.PageLinks(ctx, pagePath(in.Ref), in.Limit)
+func predictions(ctx context.Context, in predictionsInput, emit func(*Prediction) error) error {
+	preds, err := in.Client.Predictions(ctx, in.Station, in.BeginDate, in.EndDate)
 	if err != nil {
 		return mapErr(err)
 	}
-	for _, p := range pages {
+	for _, p := range preds {
 		if err := emit(p); err != nil {
 			return err
 		}
@@ -128,46 +163,67 @@ func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
 	return nil
 }
 
-// --- Resolver: the URI-native string functions, pure and network-free ---
-
-// Classify turns any accepted input — a bare path or a full noaa-tides.com URL —
-// into the canonical (type, id), so `ant resolve` and `ant url` touch no network.
-func (Domain) Classify(input string) (uriType, id string, err error) {
-	id = pagePath(input)
-	if id == "" {
-		return "", "", errs.Usage("unrecognized noaa-tides reference: %q", input)
+func airTemp(ctx context.Context, in airTempInput, emit func(*Observation) error) error {
+	obs, err := in.Client.AirTemperature(ctx, in.Station, in.BeginDate, in.EndDate)
+	if err != nil {
+		return mapErr(err)
 	}
-	return "page", id, nil
+	for _, o := range obs {
+		if err := emit(o); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// Locate is the inverse: the live https URL for a (type, id).
+func stations(ctx context.Context, in stationsInput, emit func(*Station) error) error {
+	list, err := in.Client.Stations(ctx, in.Limit)
+	if err != nil {
+		return mapErr(err)
+	}
+	for _, s := range list {
+		if err := emit(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// --- Resolver ---
+
+var stationIDRE = regexp.MustCompile(`^\d{7}$`)
+
+// Classify turns a station ID or stationhome URL into the canonical (type, id).
+func (Domain) Classify(input string) (uriType, id string, err error) {
+	input = strings.TrimSpace(input)
+	// Accept a full tidesandcurrents URL like
+	// https://tidesandcurrents.noaa.gov/stationhome.html?id=8443970
+	if strings.Contains(input, "tidesandcurrents.noaa.gov") {
+		if idx := strings.Index(input, "id="); idx >= 0 {
+			rest := input[idx+3:]
+			if end := strings.IndexAny(rest, "&# "); end >= 0 {
+				rest = rest[:end]
+			}
+			if stationIDRE.MatchString(rest) {
+				return "station", rest, nil
+			}
+		}
+	}
+	// Accept a bare numeric station ID.
+	if stationIDRE.MatchString(input) {
+		return "station", input, nil
+	}
+	return "", "", errs.Usage("unrecognized NOAA station reference: %q", input)
+}
+
+// Locate returns the live https URL for a (type, id).
 func (Domain) Locate(uriType, id string) (string, error) {
-	if uriType != "page" {
+	if uriType != "station" {
 		return "", errs.Usage("noaa-tides has no resource type %q", uriType)
 	}
-	return BaseURL + "/" + strings.Trim(id, "/"), nil
+	return "https://tidesandcurrents.noaa.gov/stationhome.html?id=" + id, nil
 }
 
-// --- helpers ---
-
-// pagePath turns any accepted input into the canonical page id: the path of a
-// full URL on this host, or a bare path with its slashes trimmed.
-func pagePath(input string) string {
-	input = strings.TrimSpace(input)
-	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-		return strings.Trim(u.Path, "/")
-	}
-	return strings.Trim(input, "/")
-}
-
-// mapErr converts a library error into the kit error kind that carries the right
-// exit code, so a host renders the same outcomes the standalone binary does. As
-// you add sentinel errors to the library, map them here, for example:
-//
-//	case errors.Is(err, ErrNotFound):
-//		return errs.NotFound("%s", err.Error())
-//	case errors.Is(err, ErrRateLimited):
-//		return errs.RateLimited("%s", err.Error())
 func mapErr(err error) error {
 	return err
 }

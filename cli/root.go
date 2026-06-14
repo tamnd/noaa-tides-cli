@@ -1,10 +1,10 @@
-// Package cli assembles the noaa-tides command tree from the noaa-tides
+// Package cli assembles the noaa-tides command tree from the noaatides
 // domain on top of the any-cli/kit framework.
 package cli
 
 import (
 	"github.com/tamnd/any-cli/kit"
-	"github.com/tamnd/noaa-tides-cli/noaa-tides"
+	noaatides "github.com/tamnd/noaa-tides-cli/noaa-tides"
 )
 
 // Build metadata, set via -ldflags at release time.
@@ -14,7 +14,7 @@ var (
 	Date    = "unknown"
 )
 
-// NewApp assembles the kit application from the noaa-tides domain. The
+// NewApp assembles the kit application from the noaatides domain. The
 // domain's Register installs the client factory and every operation, so the
 // binary and a host (ant, which blank-imports the package) share one source of
 // truth. kit.Run turns the App into the CLI, plus the serve and mcp surfaces and
@@ -24,11 +24,11 @@ var (
 // appears here automatically. Reach for app.AddCommand only for a verb that does
 // not fit the emit-records shape, the way version does below.
 func NewApp() *kit.App {
-	id := noaa-tides.Domain{}.Info().Identity
+	id := noaatides.Domain{}.Info().Identity
 	id.Version = Version
 
 	app := kit.New(id)
-	(noaa-tides.Domain{}).Register(app)
+	(noaatides.Domain{}).Register(app)
 	app.AddCommand(newVersionCmd())
 	return app
 }
